@@ -57,39 +57,42 @@ using std::atan2;
 using std::cos;
 using std::sin;
 
-const double scanPeriod = 0.1;
+const double scanPeriod = 0.1;  // 两次连续 LiDAR 扫描之间的时间周期
 
 const int systemDelay = 0; 
-int systemInitCount = 0;
+int systemInitCount = 0;  // 系统初始化的周期数
 bool systemInited = false;
 int N_SCANS = 0;
-float cloudCurvature[400000];
-int cloudSortInd[400000];
-int cloudNeighborPicked[400000];
-int cloudLabel[400000];
+float cloudCurvature[400000]; // 存储 LiDAR 扫描中各个点的曲率值
+int cloudSortInd[400000]; // 存储按曲率排序后的点的索引
+int cloudNeighborPicked[400000];  // 跟踪某个点是否已被选为特征提取或其他处理步骤的邻点
+int cloudLabel[400000]; // 标记点云中的每个点
 
-bool comp (int i,int j) { return (cloudCurvature[i]<cloudCurvature[j]); }
+bool comp (int i,int j) { return (cloudCurvature[i]<cloudCurvature[j]); } //根据曲率排列点
 
-ros::Publisher pubLaserCloud;
-ros::Publisher pubCornerPointsSharp;
-ros::Publisher pubCornerPointsLessSharp;
-ros::Publisher pubSurfPointsFlat;
-ros::Publisher pubSurfPointsLessFlat;
-ros::Publisher pubRemovePoints;
-std::vector<ros::Publisher> pubEachScan;
+ros::Publisher pubLaserCloud; //发布处理后的点云
+ros::Publisher pubCornerPointsSharp; // 发布锐利边缘点
+ros::Publisher pubCornerPointsLessSharp; // 发布次锐边缘点
+ros::Publisher pubSurfPointsFlat; // 发布平面点
+ros::Publisher pubSurfPointsLessFlat; //发布次平面点
+ros::Publisher pubRemovePoints; // 发布剔除点
+std::vector<ros::Publisher> pubEachScan; //发布各扫描线（即每个 LiDAR 环）
 
-bool PUB_EACH_LINE = false;
+bool PUB_EACH_LINE = false; // 是否要按每条扫描线单独发布数据
 
-double MINIMUM_RANGE = 0.1; 
+double MINIMUM_RANGE = 0.1; // 最小有效距离
 
 template <typename PointT>
+
+
+
 void removeClosedPointCloud(const pcl::PointCloud<PointT> &cloud_in,
                               pcl::PointCloud<PointT> &cloud_out, float thres)
 {
     if (&cloud_in != &cloud_out)
     {
         cloud_out.header = cloud_in.header;
-        cloud_out.points.resize(cloud_in.points.size());
+        cloud_out.points.resize(cloud_in.points.size()); // cloud_out的header 与 cloud_in的 对齐，并调整cloud_out的size
     }
 
     size_t j = 0;
@@ -98,17 +101,17 @@ void removeClosedPointCloud(const pcl::PointCloud<PointT> &cloud_in,
     {
         if (cloud_in.points[i].x * cloud_in.points[i].x + cloud_in.points[i].y * cloud_in.points[i].y + cloud_in.points[i].z * cloud_in.points[i].z < thres * thres)
             continue;
-        cloud_out.points[j] = cloud_in.points[i];
+        cloud_out.points[j] = cloud_in.points[i]; // 计算它与原点的距离平方值，即 x² + y² + z²，小于 thres²则忽略该点，否则将该点添加到 cloud_out 中
         j++;
     }
     if (j != cloud_in.points.size())
     {
-        cloud_out.points.resize(j);
+        cloud_out.points.resize(j); // if j 少于cloud_in.points.size()，则调整cloud_out的size为j
     }
 
-    cloud_out.height = 1;
-    cloud_out.width = static_cast<uint32_t>(j);
-    cloud_out.is_dense = true;
+    cloud_out.height = 1; // 表示单行点云
+    cloud_out.width = static_cast<uint32_t>(j); // 设置为点云数量
+    cloud_out.is_dense = true; // 表示点云没有无效点
 }
 
 void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
@@ -122,19 +125,19 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
         }
         else
             return;
-    }
+    }  // 检查系统是否已初始化
 
     TicToc t_whole;
     TicToc t_prepare;
-    std::vector<int> scanStartInd(N_SCANS, 0);
-    std::vector<int> scanEndInd(N_SCANS, 0);
+    std::vector<int> scanStartInd(N_SCANS, 0); // 表示该扫描线的起始点
+    std::vector<int> scanEndInd(N_SCANS, 0); // 表示该扫描线的终止点
 
     pcl::PointCloud<pcl::PointXYZ> laserCloudIn;
     pcl::fromROSMsg(*laserCloudMsg, laserCloudIn);
-    std::vector<int> indices;
+    std::vector<int> indices; // 存储点云中有效点的索引
 
     pcl::removeNaNFromPointCloud(laserCloudIn, laserCloudIn, indices);
-    removeClosedPointCloud(laserCloudIn, laserCloudIn, MINIMUM_RANGE);
+    removeClosedPointCloud(laserCloudIn, laserCloudIn, MINIMUM_RANGE); //过滤点云数据
 
 
     int cloudSize = laserCloudIn.points.size();
@@ -150,7 +153,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
     else if (endOri - startOri < M_PI)
     {
         endOri += 2 * M_PI;
-    }
+    }                                     // 调整角度差，使 endOri - startOri 在合理范围内(π 到 3π 之间)
     //printf("end Ori %f\n", endOri);
 
     bool halfPassed = false;
@@ -163,7 +166,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
         point.y = laserCloudIn.points[i].y;
         point.z = laserCloudIn.points[i].z;
 
-        float angle = atan(point.z / sqrt(point.x * point.x + point.y * point.y)) * 180 / M_PI;
+        float angle = atan(point.z / sqrt(point.x * point.x + point.y * point.y)) * 180 / M_PI; // 计算每个点的垂直角度
         int scanID = 0;
 
         if (N_SCANS == 16)
@@ -197,15 +200,15 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
                 count--;
                 continue;
             }
-        }
+        } 
         else
         {
             printf("wrong scan number\n");
             ROS_BREAK();
         }
-        //printf("angle %f scanID %d \n", angle, scanID);
+        //printf("angle %f scanID %d \n", angle, scanID);            // 计算 scanID
 
-        float ori = -atan2(point.y, point.x);
+        float ori = -atan2(point.y, point.x); // 计算点的水平角度 ori
         if (!halfPassed)
         { 
             if (ori < startOri - M_PI / 2)
@@ -215,7 +218,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
             else if (ori > startOri + M_PI * 3 / 2)
             {
                 ori -= 2 * M_PI;
-            }
+            }    // 
 
             if (ori - startOri > M_PI)
             {
